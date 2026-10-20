@@ -1,0 +1,12 @@
+[
+  {"id":"photocraft","name":"PhotoCraft","repo":"storytold/photocraft","tagline":"Image editing with layers, masks, type and real PSD files","color":"#3f5fe0"},
+  {"id":"vectorcraft","name":"VectorCraft","repo":"storytold/vectorcraft","tagline":"Vector illustration and drawing","color":"#e2553a"},
+  {"id":"filmcraft","name":"FilmCraft","repo":"storytold/filmcraft","tagline":"Video editing, color and sound","color":"#8a4fd6"},
+  {"id":"lightcraft","name":"LightCraft","repo":"storytold/lightcraft","tagline":"Photo library and raw development","color":"#e8a22a"},
+  {"id":"pdfcraft","name":"PdfCraft","repo":"storytold/pdfcraft","tagline":"Read, organize and protect PDFs","color":"#cf3f5a"},
+  {"id":"effectcraft","name":"EffectCraft","repo":"storytold/effectcraft","tagline":"Motion graphics and visual effects","color":"#c43fb1"},
+  {"id":"designcraft","name":"DesignCraft","repo":"storytold/designcraft","tagline":"Page layout and publishing","color":"#1f9d94"},
+  {"id":"soundcraft","name":"SoundCraft","repo":"storytold/soundcraft","tagline":"Record, edit and mix audio","color":"#2fa36b"},
+  {"id":"deckcraft","name":"DeckCraft","repo":"storytold/deckcraft","tagline":"Presentations and slide shows","color":"#ee7b2d"},
+  {"id":"wordcraft","name":"WordCraft","repo":"storytold/wordcraft","tagline":"Writing and document design","color":"#2f7fd1"}
+]

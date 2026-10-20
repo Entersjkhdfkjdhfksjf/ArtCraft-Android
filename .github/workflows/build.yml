@@ -1,0 +1,78 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create releases
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Work out version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "name=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -PversionCode=${GITHUB_RUN_NUMBER} -PversionName=${{ steps.ver.outputs.name }}
+
+      - name: Name the APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/ArtcraftLauncher-${{ steps.ver.outputs.name }}.apk"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArtcraftLauncher-apk
+          path: dist/*.apk
+
+      # Tag push (v1.2.3)  -> a normal release for that tag.
+      - name: Publish release for tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.apk \
+            --title "Artcraft Launcher ${{ steps.ver.outputs.name }}" \
+            --generate-notes
+
+      # Push to main -> rolling "latest" pre-release that always holds the newest build.
+      - name: Publish rolling latest release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/*.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Latest build (${{ steps.ver.outputs.name }})" \
+            --notes "Automatic build of commit ${GITHUB_SHA::7}. Install the .apk on Android (allow installs from this source). Builds are signed with the same key, so newer builds update older ones in place."

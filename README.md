@@ -66,3 +66,15 @@ then rebuild. To add an entry to the store list edit `app/src/main/assets/shell/
 * Audio stops when an app goes to the background (the WebView is paused).
 
 Bundled apps keep their own licenses (see each `assets/apps/<id>/LICENSE-*`, `NOTICE`, `OFL-*`).
+
+## Automatic builds (GitHub Actions)
+
+`.github/workflows/build.yml` builds the APK on every push to `main`, on `v*` tags, and on demand
+(Actions -> Build APK -> Run workflow).
+
+* Push to `main` -> the **Latest build** pre-release is replaced with the new `ArtcraftLauncher-<version>.apk`.
+* Push a tag such as `v1.1.0` (`git tag v1.1.0 && git push origin v1.1.0`) -> a normal release for that version.
+* Every run also keeps the APK as a downloadable workflow artifact.
+
+All builds are signed with `app/debug.keystore` (public, password `android`), so a newer APK installs over an
+older one without losing the apps you installed. It is a sideloading key; for the Play Store use your own key.
