@@ -21,7 +21,7 @@ class AppServer(private val ctx: Context, private val registry: AppRegistry) {
 
     private val shim: String by lazy {
         try {
-            ctx.assets.open("shim/save-shim.js").use { it.readBytes().toString(Charsets.UTF_8) }
+            ctx.assets.open("shim/host-shim.js").use { it.readBytes().toString(Charsets.UTF_8) }
         } catch (e: IOException) {
             ""
         }

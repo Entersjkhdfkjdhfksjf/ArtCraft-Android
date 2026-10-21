@@ -23,8 +23,12 @@ minSdk 26 (Android 8), targetSdk 35. Needs a reasonably current Android System W
 * One WebView per opened app is kept alive, so Back/“Launcher” returns to the grid without losing work.
   Running apps show a green dot and can be closed from the grid.
 * Apps are sandboxed offline: requests to any other host are blocked; links open in your browser.
-* Downloads from apps (Export/Save as…) are routed to Android's **Save as** dialog (`assets/shim/save-shim.js`),
-  file inputs (Open…) use the system picker.
+* Downloads from apps (Export/Save as…) are routed to Android's **Save as** dialog; if that can't open, the file is
+  written to `Downloads/Artcraft/`. File inputs (Open…) use the system document picker (all file types shown).
+* `assets/shim/host-shim.js` adapts the egui web builds to touch: a one-finger drag scrolls (with momentum),
+  press-and-hold then drag selects/moves, a double tap on a canvas editor raises the keyboard, and the top bar has a
+  **Keyboard** button. Scrolling can be switched off per app (⋯ menu on the app tile).
+* **Diagnostics** (Apps tab) shows recent open/save/keyboard events; `adb logcat -s Artcraft/open Artcraft/save` shows the same.
 * If the system kills the WebView renderer (low memory), the affected app is closed with a message instead of crashing the launcher.
 
 ## Installing apps

@@ -4,6 +4,10 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -11,8 +15,10 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
 import android.util.TypedValue
@@ -22,6 +28,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -41,6 +48,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -71,6 +79,8 @@ class MainActivity : Activity() {
     private val running: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private var foreground: String? = null
     private var immersive = false
+    private var imeShown = false      // API 30+: real keyboard visibility from insets
+    private var kbdToggle = false     // older devices: our own idea of it
 
     // file chooser / save / permission state
     private var pendingChooser: ValueCallback<Array<Uri>>? = null
@@ -187,6 +197,7 @@ class MainActivity : Activity() {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         bar.addView(barTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(barButton("Keyboard") { toggleKeyboard() })
         bar.addView(barButton("Close") { foreground?.let { closeApp(it) } })
         rootView.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)))
 
@@ -204,6 +215,9 @@ class MainActivity : Activity() {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
                 val ime = insets.getInsets(WindowInsets.Type.ime())
                 l = bars.left; t = bars.top; r = bars.right; b = maxOf(bars.bottom, ime.bottom)
+                val visible = insets.isVisible(WindowInsets.Type.ime())
+                if (imeShown && !visible) onImeHidden()
+                imeShown = visible
             } else {
                 @Suppress("DEPRECATION")
                 run {
@@ -268,8 +282,9 @@ class MainActivity : Activity() {
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
         s.mediaPlaybackRequiresUserGesture = false
-        s.allowFileAccess = false
-        s.allowContentAccess = false
+        // Needed so files picked with the system file picker can be read by the page.
+        s.allowFileAccess = true
+        s.allowContentAccess = true
         s.setSupportZoom(false)
         s.builtInZoomControls = false
         s.displayZoomControls = false
@@ -296,7 +311,7 @@ class MainActivity : Activity() {
     @SuppressLint("JavascriptInterface")
     private fun createSession(id: String): WebView {
         val wv = newWebView(AppClient(id), AppChrome())
-        wv.addJavascriptInterface(SaveBridge(), "ArtcraftHost")
+        wv.addJavascriptInterface(SaveBridge(id), "ArtcraftHost")
         wv.setOnLongClickListener { true }   // no text-selection popups over a canvas
         wv.isHapticFeedbackEnabled = false
         container.addView(wv, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -321,6 +336,8 @@ class MainActivity : Activity() {
                 it.onPause()
             }
         }
+        foreground?.let { sessions[it]?.evaluateJavascript("window.__acKeyboard&&window.__acKeyboard(false)", null) }
+        hideKeyboard()
         foreground = null
         shell?.let {
             it.visibility = View.VISIBLE
@@ -431,8 +448,13 @@ class MainActivity : Activity() {
         }
 
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            Diag.d("webview", "renderer gone for $id (crashed=${detail.didCrash()})")
             handleRendererGone(id, view, detail.didCrash())
             return true
+        }
+
+        override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+            Diag.d("http", "$id: ${errorResponse.statusCode} ${request.url}")
         }
     }
 
@@ -460,14 +482,32 @@ class MainActivity : Activity() {
             callback: ValueCallback<Array<Uri>>,
             params: FileChooserParams,
         ): Boolean {
+            Diag.d("open", "page asked for a file: mode=${params.mode} accept=${params.acceptTypes.joinToString(",")}")
             pendingChooser?.onReceiveValue(null)
             pendingChooser = callback
+            val multiple = params.mode == FileChooserParams.MODE_OPEN_MULTIPLE
+            // "*/*" on purpose: the apps validate extensions themselves, while filtering by MIME type hides
+            // perfectly good .docx / .deckcraft files on many devices.
+            val primary = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
             try {
-                startActivityForResult(params.createIntent(), REQ_FILE_CHOOSER)
+                startActivityForResult(primary, REQ_FILE_CHOOSER)
             } catch (e: Exception) {
-                pendingChooser = null
-                callback.onReceiveValue(null)
-                toast("No file picker is available.")
+                Diag.d("open", "OPEN_DOCUMENT failed: $e; trying GET_CONTENT")
+                try {
+                    val alt = Intent(Intent.ACTION_GET_CONTENT)
+                        .addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType("*/*")
+                        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+                    startActivityForResult(Intent.createChooser(alt, "Open file"), REQ_FILE_CHOOSER)
+                } catch (e2: Exception) {
+                    Diag.d("open", "GET_CONTENT failed too: $e2")
+                    pendingChooser = null
+                    callback.onReceiveValue(null)
+                    toast("No file picker is available on this device.")
+                }
             }
             return true
         }
@@ -477,7 +517,10 @@ class MainActivity : Activity() {
         }
 
         override fun onConsoleMessage(m: ConsoleMessage): Boolean {
-            Log.d("ArtcraftApp", "${m.message()} (${m.sourceId()}:${m.lineNumber()})")
+            val lvl = m.messageLevel()
+            if (lvl == ConsoleMessage.MessageLevel.ERROR || lvl == ConsoleMessage.MessageLevel.WARNING) {
+                Diag.d("js", "${lvl.name.lowercase()}: ${m.message().take(300)} (${m.sourceId()?.substringAfterLast('/')}:${m.lineNumber()})")
+            }
             return true
         }
     }
@@ -530,7 +573,9 @@ class MainActivity : Activity() {
             REQ_FILE_CHOOSER -> {
                 val cb = pendingChooser
                 pendingChooser = null
-                cb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data))
+                val uris = if (resultCode == RESULT_OK && data != null) collectUris(data) else null
+                Diag.d("open", "picker returned: result=$resultCode files=${uris?.size ?: 0}")
+                cb?.onReceiveValue(uris)
             }
             REQ_PICK_ZIP -> {
                 val uri = if (resultCode == RESULT_OK) data?.data else null
@@ -544,6 +589,12 @@ class MainActivity : Activity() {
                 pumpSaves()
             }
         }
+    }
+
+    private fun collectUris(d: Intent): Array<Uri>? {
+        val clip = d.clipData
+        if (clip != null && clip.itemCount > 0) return Array(clip.itemCount) { clip.getItemAt(it).uri }
+        return d.data?.let { arrayOf(it) }
     }
 
     @Suppress("DEPRECATION")
@@ -569,6 +620,8 @@ class MainActivity : Activity() {
         if (saveInFlight != null) return
         val s = saveQueue.removeFirstOrNull() ?: return
         saveInFlight = s
+        val size = s.file.length()
+        Diag.d("save", "asking where to save ${s.name} (${s.mime}, $size bytes)")
         val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType(s.mime.ifEmpty { "application/octet-stream" })
@@ -576,8 +629,9 @@ class MainActivity : Activity() {
         try {
             startActivityForResult(i, REQ_SAVE)
         } catch (e: Exception) {
+            Diag.d("save", "Save-as dialog failed ($e); saving to Downloads instead")
             saveInFlight = null
-            completeSave(s, null)
+            saveToDownloads(s)
             pumpSaves()
         }
     }
@@ -585,20 +639,83 @@ class MainActivity : Activity() {
     private fun completeSave(s: PendingSave, uri: Uri?) {
         saves.remove(s.token)
         if (uri == null) {
+            Diag.d("save", "cancelled: ${s.name}")
             s.file.delete()
+            toast("Save cancelled.")
             return
         }
         io.execute {
             try {
-                val out = contentResolver.openOutputStream(uri, "w") ?: throw java.io.IOException("Couldn't open the destination.")
+                val out = contentResolver.openOutputStream(uri, "w") ?: throw IOException("Couldn't open the destination.")
                 out.use { o -> s.file.inputStream().use { it.copyTo(o) } }
+                Diag.d("save", "saved ${s.name} to $uri")
                 toast("Saved ${s.name}")
+                s.file.delete()
             } catch (e: Exception) {
+                Diag.d("save", "writing to $uri failed: $e; saving to Downloads instead")
+                saveToDownloads(s)
+            }
+        }
+    }
+
+    /** Fallback that needs no dialog: Downloads/Artcraft. */
+    private fun saveToDownloads(s: PendingSave) {
+        io.execute {
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val v = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, s.name)
+                        put(MediaStore.Downloads.MIME_TYPE, s.mime.ifEmpty { "application/octet-stream" })
+                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Artcraft")
+                    }
+                    val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
+                        ?: throw IOException("Downloads isn't available.")
+                    val out = contentResolver.openOutputStream(uri) ?: throw IOException("Couldn't write to Downloads.")
+                    out.use { o -> s.file.inputStream().use { it.copyTo(o) } }
+                    toast("Saved to Downloads/Artcraft/${s.name}")
+                } else {
+                    val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: throw IOException("No storage available.")
+                    dir.mkdirs()
+                    val dest = File(dir, s.name)
+                    s.file.inputStream().use { i -> dest.outputStream().use { i.copyTo(it) } }
+                    toast("Saved to ${dest.absolutePath}")
+                }
+                Diag.d("save", "saved ${s.name} to Downloads")
+            } catch (e: Exception) {
+                Diag.d("save", "Downloads fallback failed: $e")
                 toast("Couldn't save ${s.name}: ${e.message}")
             } finally {
                 s.file.delete()
+                saves.remove(s.token)
             }
         }
+    }
+
+    // ---- keyboard ---------------------------------------------------------------------------
+
+    private fun showKeyboardFor(wv: WebView) {
+        wv.requestFocus()
+        getSystemService(InputMethodManager::class.java)?.showSoftInput(wv, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun hideKeyboard() {
+        getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(rootView.windowToken, 0)
+        kbdToggle = false
+    }
+
+    private fun toggleKeyboard() {
+        val wv = foreground?.let { sessions[it] } ?: return
+        val on = !(if (Build.VERSION.SDK_INT >= 30) imeShown else kbdToggle)
+        kbdToggle = on
+        Diag.d("keyboard", "toggle -> $on")
+        wv.evaluateJavascript("window.__acKeyboard&&window.__acKeyboard($on)", null)
+        if (on) showKeyboardFor(wv) else hideKeyboard()
+    }
+
+    /** The user dismissed the keyboard (e.g. with Back): let the page stop holding its text input. */
+    private fun onImeHidden() {
+        kbdToggle = false
+        foreground?.let { sessions[it] }?.evaluateJavascript("window.__acKeyboard&&window.__acKeyboard(false)", null)
     }
 
     // ---- bridges ----------------------------------------------------------------------------
@@ -617,6 +734,7 @@ class MainActivity : Activity() {
                 .put("source", if (a.installed) "installed" else "bundled")
                 .put("hasBuiltIn", a.bundled)
                 .put("running", running.contains(a.id))
+                .put("touchScroll", prefs.getBoolean("touchscroll.${a.id}", true))
             if (a.icon != null) o.put("icon", "/icon/${a.id}")
             if (a.bundledVersion != null) o.put("builtInVersion", a.bundledVersion)
             arr.put(o)
@@ -634,6 +752,17 @@ class MainActivity : Activity() {
         @JavascriptInterface fun install(key: String, repo: String) { installer.installFromRepo(key, repo) }
         @JavascriptInterface fun installUrl(key: String, url: String) { installer.installFromUrl(key, url) }
         @JavascriptInterface fun pickZip() { main.post { this@MainActivity.pickZip() } }
+        @JavascriptInterface fun getTouchScroll(id: String): Boolean = prefs.getBoolean("touchscroll.$id", true)
+        @JavascriptInterface fun setTouchScroll(id: String, on: Boolean) {
+            prefs.edit().putBoolean("touchscroll.$id", on).apply()
+        }
+        @JavascriptInterface fun diag(): String = Diag.dump()
+        @JavascriptInterface fun copy(text: String) {
+            main.post {
+                getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Artcraft diagnostics", text))
+                toast("Copied")
+            }
+        }
         @JavascriptInterface fun getImmersive(): Boolean = immersive
         @JavascriptInterface fun setImmersive(on: Boolean) {
             main.post {
@@ -644,8 +773,21 @@ class MainActivity : Activity() {
     }
 
     /** Exposed to apps (window.ArtcraftHost): lets them "download" blobs through a Save-as dialog. */
-    inner class SaveBridge {
+    inner class SaveBridge(private val appId: String) {
+        @JavascriptInterface fun touchScroll(): Boolean = prefs.getBoolean("touchscroll.$appId", true)
+
+        @JavascriptInterface fun showKeyboard() {
+            main.post {
+                if (foreground == appId) sessions[appId]?.let { showKeyboardFor(it) }
+            }
+        }
+
+        @JavascriptInterface fun hideKeyboard() {
+            main.post { if (foreground == appId) this@MainActivity.hideKeyboard() }
+        }
+
         @JavascriptInterface fun beginSave(name: String, mime: String): String {
+            Diag.d("save", "$appId wants to save $name ($mime)")
             val token = UUID.randomUUID().toString()
             val f = File(cacheDir, "save-$token.part")
             f.createNewFile()
@@ -664,7 +806,11 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface fun finishSave(token: String) {
-            val s = saves[token] ?: return
+            val s = saves[token]
+            if (s == null) {
+                Diag.d("save", "finishSave: unknown token")
+                return
+            }
             main.post { enqueueSave(s) }
         }
 

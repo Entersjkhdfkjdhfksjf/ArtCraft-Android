@@ -146,6 +146,10 @@
       <div>Full screen inside apps<small>Hides the top bar and system bars. Press Back to return here.</small></div>
       <button class="switch" id="immersive" role="switch" aria-checked="false" aria-label="Full screen inside apps"></button>
     </div>
+    <div class="setting">
+      <div>Diagnostics<small>Recent open/save/keyboard events. Useful if something misbehaves.</small></div>
+      <button class="btn quiet" id="diag-btn" style="min-width:0">View</button>
+    </div>
   </main>
 
   <main id="view-store" hidden>
@@ -187,6 +191,7 @@ const B = window.Launcher || (() => {
     install: (key, repo) => { let d = 0; const t = setInterval(() => { d += 10; ev({type:'progress', key, phase: d < 100 ? 'download' : 'extract', done: d, total: 100});
       if (d >= 200) { clearInterval(t); ev({type:'installed', key, id: repo.split('/')[1], name: repo.split('/')[1], version:'0.7.1'}); } }, 120); },
     installUrl: () => {}, getImmersive: () => false, setImmersive: () => {},
+    getTouchScroll: () => true, setTouchScroll: () => {}, diag: () => '12:00:00.000 [save] example log line', copy: t => navigator.clipboard && navigator.clipboard.writeText(t),
   };
 })();
 
@@ -229,13 +234,15 @@ function menu(id) {
   const a = apps.find(x => x.id === id); if (!a) return;
   let h = `<h3>${esc(a.name)} <span style="color:var(--muted);font-weight:500">v${esc(a.version)}</span></h3><button data-act="open">Open</button>`;
   if (a.running) h += `<button data-act="close">Close (discard unsaved work)</button>`;
+  h += `<button data-act="scroll">One-finger scroll: ${a.touchScroll !== false ? 'On' : 'Off'}<small style="display:block;color:var(--muted);font-weight:500;margin-top:2px">${a.touchScroll !== false ? 'Drag to scroll. Press and hold, then drag, to select or move things.' : 'Dragging selects or moves things. Scroll with two fingers if the app supports it.'}</small></button>`;
   if (a.source === 'installed') h += a.hasBuiltIn
     ? `<button class="danger" data-act="remove">Revert to built-in v${esc(a.builtInVersion || '')}</button>`
     : `<button class="danger" data-act="remove">Remove</button>`;
   else h += `<p class="hint">Built-in apps can be updated from “Get more”, but not removed.</p>`;
   openSheet(h);
   $('#sheet').onclick = e => {
-    const act = e.target.dataset && e.target.dataset.act; if (!act) return;
+    const btn = e.target.closest('button'); const act = btn && btn.dataset.act; if (!act) return;
+    if (act === 'scroll') { B.setTouchScroll(id, a.touchScroll === false); renderApps(); return menu(id); }
     closeSheet();
     if (act === 'open') B.open(id); else if (act === 'close') B.close(id); else if (act === 'remove') B.remove(id);
   };
@@ -253,6 +260,12 @@ $('#view-apps').addEventListener('click', e => {
   g.addEventListener('click', e => { const el = e.target.closest('.tile'); if (el && el.dataset.lp) { delete el.dataset.lp; e.stopImmediatePropagation(); e.preventDefault(); } }, true);
 })();
 $('#scrim').addEventListener('click', e => { if (e.target.id === 'scrim') closeSheet(); });
+
+$('#diag-btn').onclick = () => {
+  const log = B.diag ? B.diag() : '';
+  openSheet(`<h3>Diagnostics</h3><pre id="diag-pre" style="margin:0;max-height:46vh;overflow:auto;background:var(--ink);border:1px solid var(--line);border-radius:12px;padding:10px;font-size:12px;line-height:1.45;white-space:pre-wrap;-webkit-user-select:text;user-select:text">${esc(log)}</pre><button data-act="copy">Copy log</button><button data-act="x">Close</button>`);
+  $('#sheet').onclick = e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.act === 'copy') { B.copy(log); } else closeSheet(); };
+};
 
 const sw = $('#immersive');
 sw.setAttribute('aria-checked', String(!!B.getImmersive()));
